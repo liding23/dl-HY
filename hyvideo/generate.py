@@ -971,6 +971,45 @@ def main():
         help="inference bidirectional or autoregressive model. ",
     )
     parser.add_argument(
+        "--kv_compression_method",
+        type=str,
+        default="none",
+        choices=["none", "h2o", "rocketkv", "infinipot_v", "infinipot-v"],
+        help="KV compression baseline for AR vision cache. "
+        "Supported: none, h2o, rocketkv, infinipot_v (alias: infinipot-v).",
+    )
+    parser.add_argument(
+        "--kv_max_tokens",
+        type=int,
+        default=0,
+        help="Max number of vision KV tokens kept per layer after cache merge. "
+        "<=0 disables KV compression.",
+    )
+    parser.add_argument(
+        "--kv_recent_window",
+        type=int,
+        default=1024,
+        help="Recent-token window reserved by KV compression methods.",
+    )
+    parser.add_argument(
+        "--rocket_pool_kernel",
+        type=int,
+        default=31,
+        help="RocketKV baseline parameter: pooling kernel size for coarse selection.",
+    )
+    parser.add_argument(
+        "--rocket_page_size",
+        type=int,
+        default=64,
+        help="RocketKV baseline parameter: page size for coarse page scoring.",
+    )
+    parser.add_argument(
+        "--infinipot_alpha",
+        type=float,
+        default=0.6,
+        help="InfiniPot-V baseline parameter in [0,1]: TaR/VaN mixing weight.",
+    )
+    parser.add_argument(
         "--height",
         type=int,
         default=None,
@@ -1044,6 +1083,20 @@ def main():
     )
 
     args = parser.parse_args()
+    args.kv_compression_method = args.kv_compression_method.lower().replace("-", "_")
+    if args.kv_compression_method == "none" and args.kv_max_tokens > 0:
+        rank0_log(
+            "KV compression is disabled because method=none; kv_max_tokens will be ignored.",
+            "WARNING",
+        )
+    if args.kv_compression_method != "none" and args.kv_max_tokens <= 0:
+        rank0_log(
+            "KV compression method is enabled but kv_max_tokens<=0, "
+            "so compression remains disabled.",
+            "WARNING",
+        )
+    if not (0.0 <= args.infinipot_alpha <= 1.0):
+        raise ValueError("--infinipot_alpha must be in [0, 1].")
 
     assert args.image_path is not None
 

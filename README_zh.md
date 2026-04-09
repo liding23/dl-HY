@@ -161,6 +161,9 @@ AR_DISTILL_ACTION_MODEL_PATH=<download_script打印的路径>/ar_distilled_actio
 | `NUM_FRAMES` | 要生成的帧数（默认：125）。**重要说明：** 必须满足 `(num_frames-1) % 4 == 0`。对于双向模型须满足：`[(num_frames-1) // 4 + 1] % 16 == 0`。对于单向模型须满足：`[(num_frames-1) // 4 + 1] % 4 == 0` |
 | `N_INFERENCE_GPU` | 并行推理的 GPU 数量                                         |
 | `POSE` | 相机轨迹：姿态字符串（如 `w-31`代表生成`[1 + 31]`latents）或 JSON 文件路径 |
+| `KV_COMPRESSION_METHOD` | AR 推理的 KV 压缩 baseline：`none` / `h2o` / `rocketkv` / `infinipot_v` |
+| `KV_MAX_TOKENS` | 每层视觉 KV 合并后的最大保留 token 数（`<=0` 表示关闭压缩） |
+| `KV_RECENT_WINDOW` | KV 压缩时保留的最近 token 窗口 |
 
 #### 模型选择
 
@@ -180,6 +183,30 @@ AR_DISTILL_ACTION_MODEL_PATH=<download_script打印的路径>/ar_distilled_actio
    ```bash
    --action_ckpt $AR_DISTILL_ACTION_MODEL_PATH --few_step true --num_inference_steps 4 --model_type 'ar'
    ```
+
+#### KV 压缩 Baseline（仅 AR）
+
+若要测试 KV 压缩 baseline，可在 `run.sh` 中设置：
+
+```bash
+KV_COMPRESSION_METHOD=h2o        # 或 rocketkv / infinipot_v / none
+KV_MAX_TOKENS=16384              # 每层缓存预算（token 数）
+KV_RECENT_WINDOW=1024
+ROCKET_POOL_KERNEL=31
+ROCKET_PAGE_SIZE=64
+INFINIPOT_ALPHA=0.6
+```
+
+启动命令会将这些参数传给 `hyvideo/generate.py`：
+
+```bash
+--kv_compression_method $KV_COMPRESSION_METHOD \
+--kv_max_tokens $KV_MAX_TOKENS \
+--kv_recent_window $KV_RECENT_WINDOW \
+--rocket_pool_kernel $ROCKET_POOL_KERNEL \
+--rocket_page_size $ROCKET_PAGE_SIZE \
+--infinipot_alpha $INFINIPOT_ALPHA
+```
 
 #### 相机轨迹控制
 

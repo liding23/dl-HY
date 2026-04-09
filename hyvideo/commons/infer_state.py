@@ -34,6 +34,14 @@ class InferState:
     # vae related
     use_vae_parallel: bool = False  # whether to use vae parallel
 
+    # kv compression related
+    kv_compression_method: str = "none"  # none/h2o/rocketkv/infinipot_v
+    kv_max_tokens: int = 0  # <=0 means disabled
+    kv_recent_window: int = 1024
+    rocket_pool_kernel: int = 31
+    rocket_page_size: int = 64
+    infinipot_alpha: float = 0.6
+
 
 __infer_state = None
 
@@ -68,6 +76,13 @@ def initialize_infer_state(args):
         include_patterns=include_patterns,
         # vae related
         use_vae_parallel=args.use_vae_parallel,
+        # kv compression related
+        kv_compression_method=getattr(args, "kv_compression_method", "none"),
+        kv_max_tokens=getattr(args, "kv_max_tokens", 0),
+        kv_recent_window=getattr(args, "kv_recent_window", 1024),
+        rocket_pool_kernel=getattr(args, "rocket_pool_kernel", 31),
+        rocket_page_size=getattr(args, "rocket_page_size", 64),
+        infinipot_alpha=getattr(args, "infinipot_alpha", 0.6),
     )
     return __infer_state
 

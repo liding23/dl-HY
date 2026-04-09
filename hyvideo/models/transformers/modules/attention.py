@@ -46,6 +46,7 @@ except Exception:
 
 from hyvideo.models.transformers.modules.ssta_attention import ssta_3d_attention
 from hyvideo.commons.infer_state import get_infer_state
+from hyvideo.utils.kv_compression import compress_vision_kv_cache
 
 
 @torch.compiler.disable
@@ -280,6 +281,26 @@ def sequence_parallel_attention_vision(
     encoder_value = kv_cache[block_idx]["v_txt"]
     encoder_key = repeat(encoder_key, "B H S D->(B R) H S D", R=2)
     encoder_value = repeat(encoder_value, "B H S D->(B R) H S D", R=2)
+
+    infer_state = get_infer_state()
+    if (
+        infer_state is not None
+        and getattr(infer_state, "kv_compression_method", "none") != "none"
+        and getattr(infer_state, "kv_max_tokens", 0) > 0
+        and not cache_vision
+        and cache_vision_key is not None
+    ):
+        key, value = compress_vision_kv_cache(
+            key=key,
+            value=value,
+            query=query,
+            method=infer_state.kv_compression_method,
+            max_tokens=infer_state.kv_max_tokens,
+            recent_window=infer_state.kv_recent_window,
+            rocket_pool_kernel=infer_state.rocket_pool_kernel,
+            rocket_page_size=infer_state.rocket_page_size,
+            infinipot_alpha=infer_state.infinipot_alpha,
+        )
 
     key = torch.cat([encoder_key, key], dim=2)
     value = torch.cat([encoder_value, value], dim=2)
