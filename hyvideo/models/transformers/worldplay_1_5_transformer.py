@@ -1263,7 +1263,13 @@ class HunyuanVideo_1_5_DiffusionTransformer(ModelMixin, ConfigMixin):
             transformer_num_layers = len(self.double_blocks)
             for _ in range(transformer_num_layers):
                 _kv_cache_new.append(
-                    {"k_vision": None, "v_vision": None, "k_txt": None, "v_txt": None}
+                    {
+                        "k_vision": None,
+                        "v_vision": None,
+                        "k_txt": None,
+                        "v_txt": None,
+                        "kv_compress_state": None,
+                    }
                 )
 
         txt, text_mask, vec_txt = self.get_text_and_mask(
@@ -1330,6 +1336,7 @@ class HunyuanVideo_1_5_DiffusionTransformer(ModelMixin, ConfigMixin):
                         "v_vision": None,
                         "k_txt": kv_cache[i]["k_txt"],
                         "v_txt": kv_cache[i]["v_txt"],
+                        "kv_compress_state": kv_cache[i].get("kv_compress_state", None),
                     }
                 )
 

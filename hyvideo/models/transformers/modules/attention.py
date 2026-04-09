@@ -17,6 +17,8 @@
 import einops
 import torch
 import os
+import json
+from datetime import datetime
 from typing import Optional
 from loguru import logger
 import numpy as np
@@ -46,6 +48,47 @@ except Exception:
 
 from hyvideo.models.transformers.modules.ssta_attention import ssta_3d_attention
 from hyvideo.commons.infer_state import get_infer_state
+from hyvideo.utils.kv_compression import compress_vision_kv_cache
+
+
+def _kv_debug_allowed(infer_state, phase: str, block_idx: int, decode_step: int) -> bool:
+    if infer_state is None or not getattr(infer_state, "kv_debug_log", False):
+        return False
+    phase_filter = getattr(infer_state, "kv_debug_phase", "both")
+    if phase_filter != "both" and phase_filter != phase:
+        return False
+    layer_filter = getattr(infer_state, "kv_debug_layers", None)
+    if layer_filter is not None and block_idx not in layer_filter:
+        return False
+    if phase == "decode":
+        interval = max(1, int(getattr(infer_state, "kv_debug_interval", 10)))
+        return decode_step % interval == 0
+    return True
+
+
+def _kv_debug_emit(infer_state, payload: dict):
+    if not getattr(infer_state, "kv_debug_log", False):
+        return
+    msg = (
+        "[KV-DEBUG] "
+        f"method={payload.get('method')} phase={payload.get('phase')} "
+        f"layer={payload.get('layer_idx')} step={payload.get('decode_step')} "
+        f"seq={payload.get('seq_in')}->{payload.get('seq_out')} "
+        f"budget={payload.get('budget')}"
+    )
+    if getattr(infer_state, "kv_debug_level", "summary") == "detail":
+        for k in sorted(payload.keys()):
+            if k not in {"method", "phase", "layer_idx", "decode_step", "seq_in", "seq_out", "budget"}:
+                msg += f" {k}={payload.get(k)}"
+    logger.info(msg)
+
+    debug_file = getattr(infer_state, "kv_debug_file", "")
+    if debug_file:
+        line = dict(payload)
+        line["ts"] = datetime.utcnow().isoformat() + "Z"
+        with open(debug_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(line, ensure_ascii=True) + "\n")
+
 
 
 @torch.compiler.disable
@@ -251,6 +294,9 @@ def sequence_parallel_attention_vision(
         query = all_to_all_4D(query, sp_group, scatter_dim=2, gather_dim=1)
         key = all_to_all_4D(key, sp_group, scatter_dim=2, gather_dim=1)
         value = all_to_all_4D(value, sp_group, scatter_dim=2, gather_dim=1)
+        if cache_vision:
+            vision_kv["k_vision"] = key
+            vision_kv["v_vision"] = value
 
     query = query.transpose(1, 2)
     key = key.transpose(1, 2)
@@ -268,6 +314,9 @@ def sequence_parallel_attention_vision(
     if not cache_vision and cache_vision_key is not None:
         key = torch.cat([cache_vision_key, key], dim=2)
         value = torch.cat([cache_vision_value, value], dim=2)
+        history_len = cache_vision_key.shape[2]
+    else:
+        history_len = 0
 
     # if block_idx == 0 and timestep_id == 0:
     #     print(f'key.shape after cat vision cache: {key.shape}')
@@ -280,6 +329,42 @@ def sequence_parallel_attention_vision(
     encoder_value = kv_cache[block_idx]["v_txt"]
     encoder_key = repeat(encoder_key, "B H S D->(B R) H S D", R=2)
     encoder_value = repeat(encoder_value, "B H S D->(B R) H S D", R=2)
+
+    infer_state = get_infer_state()
+    if (
+        infer_state is not None
+        and getattr(infer_state, "kv_compression_method", "none") != "none"
+        and getattr(infer_state, "kv_max_tokens", 0) > 0
+    ):
+        layer_state_key = "kv_compress_state"
+        if layer_state_key not in kv_cache[block_idx]:
+            kv_cache[block_idx][layer_state_key] = None
+
+        phase = "prefill" if cache_vision else "decode"
+        key, value, state = compress_vision_kv_cache(
+            key=key,
+            value=value,
+            query=query,
+            method=infer_state.kv_compression_method,
+            max_tokens=infer_state.kv_max_tokens,
+            recent_window=infer_state.kv_recent_window,
+            rocket_pool_kernel=infer_state.rocket_pool_kernel,
+            rocket_page_size=infer_state.rocket_page_size,
+            infinipot_alpha=infer_state.infinipot_alpha,
+            phase=phase,
+            state=kv_cache[block_idx][layer_state_key],
+            history_len=history_len,
+        )
+        kv_cache[block_idx][layer_state_key] = state
+        if state is not None and isinstance(state, dict):
+            debug_info = state.get("last_debug")
+            if isinstance(debug_info, dict):
+                decode_step = int(debug_info.get("decode_step", 0))
+                if _kv_debug_allowed(infer_state, phase, block_idx, decode_step):
+                    payload = dict(debug_info)
+                    payload["layer_idx"] = block_idx
+                    if int(os.environ.get("RANK", "0")) == 0:
+                        _kv_debug_emit(infer_state, payload)
 
     key = torch.cat([encoder_key, key], dim=2)
     value = torch.cat([encoder_value, value], dim=2)

@@ -297,6 +297,26 @@ def rank0_log(message, level):
         loguru.logger.log(level, message)
 
 
+def parse_layer_spec(spec: str):
+    spec = (spec or "all").strip().lower()
+    if spec == "all":
+        return None
+    layers = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            start, end = int(a), int(b)
+            if start > end:
+                start, end = end, start
+            layers.update(range(start, end + 1))
+        else:
+            layers.add(int(part))
+    return layers
+
+
 def str_to_bool(value):
     """Convert string to boolean, supporting true/false, 1/0, yes/no.
     If value is None (when flag is provided without value), returns True."""
@@ -971,6 +991,85 @@ def main():
         help="inference bidirectional or autoregressive model. ",
     )
     parser.add_argument(
+        "--kv_compression_method",
+        type=str,
+        default="none",
+        choices=["none", "h2o", "rocketkv", "infinipot_v", "infinipot-v"],
+        help="KV compression baseline for AR vision cache. "
+        "Supported: none, h2o, rocketkv, infinipot_v (alias: infinipot-v).",
+    )
+    parser.add_argument(
+        "--kv_max_tokens",
+        type=int,
+        default=0,
+        help="Max number of vision KV tokens kept per layer after cache merge. "
+        "<=0 disables KV compression.",
+    )
+    parser.add_argument(
+        "--kv_recent_window",
+        type=int,
+        default=1024,
+        help="Recent-token window reserved by KV compression methods.",
+    )
+    parser.add_argument(
+        "--rocket_pool_kernel",
+        type=int,
+        default=31,
+        help="RocketKV baseline parameter: pooling kernel size for coarse selection.",
+    )
+    parser.add_argument(
+        "--rocket_page_size",
+        type=int,
+        default=64,
+        help="RocketKV baseline parameter: page size for coarse page scoring.",
+    )
+    parser.add_argument(
+        "--infinipot_alpha",
+        type=float,
+        default=0.6,
+        help="InfiniPot-V baseline parameter in [0,1]: TaR/VaN mixing weight.",
+    )
+    parser.add_argument(
+        "--kv_debug_log",
+        type=str_to_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Enable KV compression debug logging.",
+    )
+    parser.add_argument(
+        "--kv_debug_phase",
+        type=str,
+        default="both",
+        choices=["prefill", "decode", "both"],
+        help="KV debug log phase filter.",
+    )
+    parser.add_argument(
+        "--kv_debug_layers",
+        type=str,
+        default="all",
+        help="Layer filter for KV debug logs, e.g. all / 0-3,10,20.",
+    )
+    parser.add_argument(
+        "--kv_debug_interval",
+        type=int,
+        default=10,
+        help="Decode-step interval for KV debug logs.",
+    )
+    parser.add_argument(
+        "--kv_debug_level",
+        type=str,
+        default="summary",
+        choices=["summary", "detail"],
+        help="KV debug verbosity level.",
+    )
+    parser.add_argument(
+        "--kv_debug_file",
+        type=str,
+        default="",
+        help="Optional JSONL file to save KV debug entries.",
+    )
+    parser.add_argument(
         "--height",
         type=int,
         default=None,
@@ -1044,6 +1143,21 @@ def main():
     )
 
     args = parser.parse_args()
+    args.kv_compression_method = args.kv_compression_method.lower().replace("-", "_")
+    if args.kv_compression_method == "none" and args.kv_max_tokens > 0:
+        rank0_log(
+            "KV compression is disabled because method=none; kv_max_tokens will be ignored.",
+            "WARNING",
+        )
+    if args.kv_compression_method != "none" and args.kv_max_tokens <= 0:
+        rank0_log(
+            "KV compression method is enabled but kv_max_tokens<=0, "
+            "so compression remains disabled.",
+            "WARNING",
+        )
+    if not (0.0 <= args.infinipot_alpha <= 1.0):
+        raise ValueError("--infinipot_alpha must be in [0, 1].")
+    args.kv_debug_interval = max(1, int(args.kv_debug_interval))
 
     assert args.image_path is not None
 

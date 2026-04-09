@@ -41,6 +41,18 @@ N_INFERENCE_GPU=1 # Parallel inference GPU count.
 REWRITE=false   # Enable prompt rewriting. Please ensure rewrite vLLM server is deployed and configured.
 ENABLE_SR=false # Enable super resolution. When the NUM_FRAMES == 125, you can set it to true
 
+# KV compression baseline options for AR inference:
+# - none (disable, default)
+# - h2o
+# - rocketkv
+# - infinipot_v
+KV_COMPRESSION_METHOD=none
+KV_MAX_TOKENS=0        # <=0 disables compression. Example: 16384
+KV_RECENT_WINDOW=1024  # Recent window reserved by compression.
+ROCKET_POOL_KERNEL=31  # RocketKV coarse selection kernel.
+ROCKET_PAGE_SIZE=64    # RocketKV page size.
+INFINIPOT_ALPHA=0.6    # InfiniPot-V TaR/VaN mixing weight in [0,1].
+
 # inference with bidirectional model
 # torchrun --nproc_per_node=$N_INFERENCE_GPU hyvideo/generate.py  \
 #   --prompt "$PROMPT" \
@@ -94,6 +106,12 @@ torchrun --nproc_per_node=$N_INFERENCE_GPU -m hyvideo.generate \
   --few_step true \
   --num_inference_steps 4 \
   --model_type 'ar' \
+  --kv_compression_method $KV_COMPRESSION_METHOD \
+  --kv_max_tokens $KV_MAX_TOKENS \
+  --kv_recent_window $KV_RECENT_WINDOW \
+  --rocket_pool_kernel $ROCKET_POOL_KERNEL \
+  --rocket_page_size $ROCKET_PAGE_SIZE \
+  --infinipot_alpha $INFINIPOT_ALPHA \
   --use_vae_parallel false \
   --use_sageattn false \
   --use_fp8_gemm false

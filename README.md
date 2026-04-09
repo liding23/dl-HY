@@ -243,6 +243,9 @@ In `run.sh`, you can configure:
 | `NUM_FRAMES` | Number of frames to generate (default: 125). **Important Note:** Must satisfy `(num_frames-1) % 4 == 0`. For bidirectional models: `[(num_frames-1) // 4 + 1] % 16 == 0`. For autoregressive models: `[(num_frames-1) // 4 + 1] % 4 == 0` |
 | `N_INFERENCE_GPU` | Number of GPUs for parallel inference                                                               |
 | `POSE` | Camera trajectory: pose string (e.g., `w-31` means generating `[1 + 31]` latents) or JSON file path |
+| `KV_COMPRESSION_METHOD` | KV compression baseline for AR inference: `none` / `h2o` / `rocketkv` / `infinipot_v` |
+| `KV_MAX_TOKENS` | Max number of vision KV tokens kept per layer after cache merge (`<=0` disables compression) |
+| `KV_RECENT_WINDOW` | Recent-token window reserved by KV compression |
 
 #### Model Selection
 
@@ -262,6 +265,30 @@ Uncomment one of the three inference commands in `run.sh`:
    ```bash
    --action_ckpt $AR_DISTILL_ACTION_MODEL_PATH --few_step true --num_inference_steps 4 --model_type 'ar'
    ```
+
+#### KV Compression Baselines (AR Only)
+
+To evaluate KV compression baselines in autoregressive inference, configure in `run.sh`:
+
+```bash
+KV_COMPRESSION_METHOD=h2o        # or rocketkv / infinipot_v / none
+KV_MAX_TOKENS=16384              # set cache budget (tokens per layer)
+KV_RECENT_WINDOW=1024
+ROCKET_POOL_KERNEL=31
+ROCKET_PAGE_SIZE=64
+INFINIPOT_ALPHA=0.6
+```
+
+The launch command forwards these options to `hyvideo/generate.py`:
+
+```bash
+--kv_compression_method $KV_COMPRESSION_METHOD \
+--kv_max_tokens $KV_MAX_TOKENS \
+--kv_recent_window $KV_RECENT_WINDOW \
+--rocket_pool_kernel $ROCKET_POOL_KERNEL \
+--rocket_page_size $ROCKET_PAGE_SIZE \
+--infinipot_alpha $INFINIPOT_ALPHA
+```
 
 #### Camera Trajectory Control
 
