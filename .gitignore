@@ -26,6 +26,9 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+debug_qk
+attn_maps
+outputs
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -168,3 +171,5 @@ ckpts/
 
 
 hyvideo/utils/rewrite/i2v_env.sh
+
+eval_micro

@@ -57,6 +57,144 @@ def is_blocks(n: str, m) -> bool:
     )
     return is_valid
 
+    
+class MMSingleStreamBlock(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        heads_num: int,
+        mlp_width_ratio: float = 4.0,
+        mlp_act_type: str = "gelu_tanh",
+        attn_mode: str = None,
+        qk_norm: bool = True,
+        qk_norm_type: str = "rms",
+        qk_scale: float = None,
+        dtype: Optional[torch.dtype] = None,
+        device: Optional[torch.device] = None,
+    ):
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+
+        self.deterministic = False
+        self.attn_mode = attn_mode
+
+        self.hidden_size = hidden_size
+        self.heads_num = heads_num
+        head_dim = hidden_size // heads_num
+        mlp_hidden_dim = int(hidden_size * mlp_width_ratio)
+        self.mlp_hidden_dim = mlp_hidden_dim
+        self.scale = qk_scale or head_dim**-0.5
+
+        self.linear1_q = nn.Linear(hidden_size, hidden_size, **factory_kwargs)
+        self.linear1_k = nn.Linear(hidden_size, hidden_size, **factory_kwargs)
+        self.linear1_v = nn.Linear(hidden_size, hidden_size, **factory_kwargs)
+        self.linear1_mlp = nn.Linear(hidden_size, mlp_hidden_dim, **factory_kwargs)
+        self.linear2 = LinearWarpforSingle(
+            hidden_size + mlp_hidden_dim, hidden_size, bias=True, **factory_kwargs
+        )
+        self.mlp_act = get_activation_layer(mlp_act_type)()
+
+        qk_norm_layer = get_norm_layer(qk_norm_type)
+        self.q_norm = (
+            qk_norm_layer(head_dim, elementwise_affine=True, eps=1e-6, **factory_kwargs)
+            if qk_norm
+            else nn.Identity()
+        )
+        self.k_norm = (
+            qk_norm_layer(head_dim, elementwise_affine=True, eps=1e-6, **factory_kwargs)
+            if qk_norm
+            else nn.Identity()
+        )
+
+        self.pre_norm = nn.LayerNorm(
+            hidden_size, elementwise_affine=False, eps=1e-6, **factory_kwargs
+        )
+        self.modulation = ModulateDiT(
+            hidden_size,
+            factor=3,
+            act_layer=get_activation_layer("silu"),
+            **factory_kwargs,
+        )
+        self.hybrid_seq_parallel_attn = None
+
+    def enable_deterministic(self):
+        self.deterministic = True
+
+    def disable_deterministic(self):
+        self.deterministic = False
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        vec_txt: torch.Tensor,
+        vec: torch.Tensor,
+        txt_len: int,
+        freqs_cis: Tuple[torch.Tensor, torch.Tensor] = None,
+        text_mask=None,
+        attn_param=None,
+        is_flash=False,
+    ) -> torch.Tensor:
+        """Forward pass for the single stream block."""
+        mod_shift, mod_scale, mod_gate = self.modulation(vec).chunk(3, dim=-1)
+        txt_mod_shift, txt_mod_scale, txt_mod_gate = self.modulation(vec_txt).chunk(
+            3, dim=-1
+        )
+
+        x_pre_norm = self.pre_norm(x)
+        img_token, txt_token = x_pre_norm[:, :-txt_len, :], x_pre_norm[:, -txt_len:, :]
+
+        img_mod = modulate(img_token, shift=mod_shift, scale=mod_scale)
+        txt_mod = modulate(txt_token, shift=txt_mod_shift, scale=txt_mod_scale)
+        x_mod = torch.cat([img_mod, txt_mod], dim=1)
+
+        q = self.linear1_q(x_mod)
+        k = self.linear1_k(x_mod)
+        v = self.linear1_v(x_mod)
+
+        q = rearrange(q, "B L (H D) -> B L H D", H=self.heads_num)
+        k = rearrange(k, "B L (H D) -> B L H D", H=self.heads_num)
+        v = rearrange(v, "B L (H D) -> B L H D", H=self.heads_num)
+
+        mlp = self.linear1_mlp(x_mod)
+
+        # Apply QK-Norm if needed.
+        q = self.q_norm(q).to(v)
+        k = self.k_norm(k).to(v)
+
+        img_q, txt_q = q[:, :-txt_len, :, :], q[:, -txt_len:, :, :]
+        img_k, txt_k = k[:, :-txt_len, :, :], k[:, -txt_len:, :, :]
+        img_v, txt_v = v[:, :-txt_len, :, :], v[:, -txt_len:, :, :]
+        img_qq, img_kk = apply_rotary_emb(img_q, img_k, freqs_cis, head_first=False)
+        assert (
+            img_qq.shape == img_q.shape and img_kk.shape == img_k.shape
+        ), f"img_kk: {img_qq.shape}, img_q: {img_q.shape}, img_kk: {img_kk.shape}, img_k: {img_k.shape}"
+        img_q, img_k = img_qq, img_kk
+
+        if is_flash:
+            attn_mode = "flash"
+        else:
+            attn_mode = self.attn_mode
+        attn = parallel_attention(
+            (img_q, txt_q),
+            (img_k, txt_k),
+            (img_v, txt_v),
+            img_q_len=img_q.shape[1],
+            img_kv_len=img_k.shape[1],
+            text_mask=text_mask,
+            attn_mode=attn_mode,
+            attn_param=attn_param,
+        )
+        output = self.linear2(attn, self.mlp_act(mlp))
+        img_output, txt_output = output[:, :-txt_len, :], output[:, -txt_len:, :]
+
+        img_output = apply_gate(img_output, gate=mod_gate)
+        txt_output = apply_gate(txt_output, gate=txt_mod_gate)
+        gate_output = torch.cat([img_output, txt_output], dim=1)
+
+        return x + gate_output
+
+
 
 class MMDoubleStreamBlock(nn.Module):
 
@@ -304,6 +442,7 @@ class MMDoubleStreamBlock(nn.Module):
     def forward_vision(
         self,
         img: torch.Tensor,
+        timestep: torch.Tensor,
         vec: torch.Tensor,
         freqs_cis: tuple = None,
         attn_param=None,
@@ -355,6 +494,7 @@ class MMDoubleStreamBlock(nn.Module):
             (img_k, img_k_prope),
             (img_v, img_v_prope),
             block_idx=block_idx,
+            timestep=timestep,
             kv_cache=kv_cache,
             cache_vision=cache_vision,
         )
@@ -598,142 +738,6 @@ class MMDoubleStreamBlock(nn.Module):
         else:
             return self.forward_sr(**kwargs)
 
-
-class MMSingleStreamBlock(nn.Module):
-
-    def __init__(
-        self,
-        hidden_size: int,
-        heads_num: int,
-        mlp_width_ratio: float = 4.0,
-        mlp_act_type: str = "gelu_tanh",
-        attn_mode: str = None,
-        qk_norm: bool = True,
-        qk_norm_type: str = "rms",
-        qk_scale: float = None,
-        dtype: Optional[torch.dtype] = None,
-        device: Optional[torch.device] = None,
-    ):
-        factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__()
-
-        self.deterministic = False
-        self.attn_mode = attn_mode
-
-        self.hidden_size = hidden_size
-        self.heads_num = heads_num
-        head_dim = hidden_size // heads_num
-        mlp_hidden_dim = int(hidden_size * mlp_width_ratio)
-        self.mlp_hidden_dim = mlp_hidden_dim
-        self.scale = qk_scale or head_dim**-0.5
-
-        self.linear1_q = nn.Linear(hidden_size, hidden_size, **factory_kwargs)
-        self.linear1_k = nn.Linear(hidden_size, hidden_size, **factory_kwargs)
-        self.linear1_v = nn.Linear(hidden_size, hidden_size, **factory_kwargs)
-        self.linear1_mlp = nn.Linear(hidden_size, mlp_hidden_dim, **factory_kwargs)
-        self.linear2 = LinearWarpforSingle(
-            hidden_size + mlp_hidden_dim, hidden_size, bias=True, **factory_kwargs
-        )
-        self.mlp_act = get_activation_layer(mlp_act_type)()
-
-        qk_norm_layer = get_norm_layer(qk_norm_type)
-        self.q_norm = (
-            qk_norm_layer(head_dim, elementwise_affine=True, eps=1e-6, **factory_kwargs)
-            if qk_norm
-            else nn.Identity()
-        )
-        self.k_norm = (
-            qk_norm_layer(head_dim, elementwise_affine=True, eps=1e-6, **factory_kwargs)
-            if qk_norm
-            else nn.Identity()
-        )
-
-        self.pre_norm = nn.LayerNorm(
-            hidden_size, elementwise_affine=False, eps=1e-6, **factory_kwargs
-        )
-        self.modulation = ModulateDiT(
-            hidden_size,
-            factor=3,
-            act_layer=get_activation_layer("silu"),
-            **factory_kwargs,
-        )
-        self.hybrid_seq_parallel_attn = None
-
-    def enable_deterministic(self):
-        self.deterministic = True
-
-    def disable_deterministic(self):
-        self.deterministic = False
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        vec_txt: torch.Tensor,
-        vec: torch.Tensor,
-        txt_len: int,
-        freqs_cis: Tuple[torch.Tensor, torch.Tensor] = None,
-        text_mask=None,
-        attn_param=None,
-        is_flash=False,
-    ) -> torch.Tensor:
-        """Forward pass for the single stream block."""
-        mod_shift, mod_scale, mod_gate = self.modulation(vec).chunk(3, dim=-1)
-        txt_mod_shift, txt_mod_scale, txt_mod_gate = self.modulation(vec_txt).chunk(
-            3, dim=-1
-        )
-
-        x_pre_norm = self.pre_norm(x)
-        img_token, txt_token = x_pre_norm[:, :-txt_len, :], x_pre_norm[:, -txt_len:, :]
-
-        img_mod = modulate(img_token, shift=mod_shift, scale=mod_scale)
-        txt_mod = modulate(txt_token, shift=txt_mod_shift, scale=txt_mod_scale)
-        x_mod = torch.cat([img_mod, txt_mod], dim=1)
-
-        q = self.linear1_q(x_mod)
-        k = self.linear1_k(x_mod)
-        v = self.linear1_v(x_mod)
-
-        q = rearrange(q, "B L (H D) -> B L H D", H=self.heads_num)
-        k = rearrange(k, "B L (H D) -> B L H D", H=self.heads_num)
-        v = rearrange(v, "B L (H D) -> B L H D", H=self.heads_num)
-
-        mlp = self.linear1_mlp(x_mod)
-
-        # Apply QK-Norm if needed.
-        q = self.q_norm(q).to(v)
-        k = self.k_norm(k).to(v)
-
-        img_q, txt_q = q[:, :-txt_len, :, :], q[:, -txt_len:, :, :]
-        img_k, txt_k = k[:, :-txt_len, :, :], k[:, -txt_len:, :, :]
-        img_v, txt_v = v[:, :-txt_len, :, :], v[:, -txt_len:, :, :]
-        img_qq, img_kk = apply_rotary_emb(img_q, img_k, freqs_cis, head_first=False)
-        assert (
-            img_qq.shape == img_q.shape and img_kk.shape == img_k.shape
-        ), f"img_kk: {img_qq.shape}, img_q: {img_q.shape}, img_kk: {img_kk.shape}, img_k: {img_k.shape}"
-        img_q, img_k = img_qq, img_kk
-
-        if is_flash:
-            attn_mode = "flash"
-        else:
-            attn_mode = self.attn_mode
-        attn = parallel_attention(
-            (img_q, txt_q),
-            (img_k, txt_k),
-            (img_v, txt_v),
-            img_q_len=img_q.shape[1],
-            img_kv_len=img_k.shape[1],
-            text_mask=text_mask,
-            attn_mode=attn_mode,
-            attn_param=attn_param,
-        )
-        output = self.linear2(attn, self.mlp_act(mlp))
-        img_output, txt_output = output[:, :-txt_len, :], output[:, -txt_len:, :]
-
-        img_output = apply_gate(img_output, gate=mod_gate)
-        txt_output = apply_gate(txt_output, gate=txt_mod_gate)
-        gate_output = torch.cat([img_output, txt_output], dim=1)
-
-        return x + gate_output
 
 
 class HunyuanVideo_1_5_DiffusionTransformer(ModelMixin, ConfigMixin):
@@ -1398,6 +1402,7 @@ class HunyuanVideo_1_5_DiffusionTransformer(ModelMixin, ConfigMixin):
                 ar_vision_inference=True,
                 img=img,
                 vec=vec,
+                timestep=timestep,
                 freqs_cis=freqs_cis,
                 attn_param=self.attn_param,
                 block_idx=index,

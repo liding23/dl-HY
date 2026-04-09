@@ -24,6 +24,8 @@ from typing import Any, Dict, List, Optional, Union
 
 import loguru
 
+import pdb
+
 import numpy as np
 import torch
 from einops import rearrange
@@ -1082,9 +1084,9 @@ class HunyuanVideo_1_5_Pipeline(DiffusionPipeline):
                     current_frame_idx, current_frame_idx + self.chunk_latent_frames, 4
                 ):
                     selected_history_frame_id = select_aligned_memory_frames(
-                        viewmats[0].cpu().detach().numpy(),
+                        viewmats[0].cpu().detach().numpy(), ## !!
                         chunk_start_idx,
-                        memory_frames=20,
+                        memory_frames=12,
                         temporal_context_size=12,
                         pred_latent_size=4,
                         points_local=self.points_local,
@@ -1102,6 +1104,7 @@ class HunyuanVideo_1_5_Pipeline(DiffusionPipeline):
                 ]
 
                 context_latents = latents[:, :, selected_frame_indices]
+
                 context_cond_latents_input = cond_latents[:, :, selected_frame_indices]
                 context_latents_input = torch.concat(
                     [context_latents, context_cond_latents_input], dim=1
@@ -1117,6 +1120,15 @@ class HunyuanVideo_1_5_Pipeline(DiffusionPipeline):
                     device=device,
                     dtype=timesteps.dtype,
                 )
+
+                print(f"selected_frame_indices: {selected_frame_indices}")
+                # print(f"latents shape: {latents.shape}")
+                # print(f"cond_latents shape: {cond_latents.shape}")
+                # print(f"context_latents shape: {context_latents.shape}")
+                # print(f"context_cond_latents_input shape: {context_cond_latents_input.shape}")
+
+                # pdb.set_trace()
+
                 # compute kv cache
                 with (
                     torch.autocast(
@@ -1167,6 +1179,8 @@ class HunyuanVideo_1_5_Pipeline(DiffusionPipeline):
                         )
 
                 self.scheduler.set_timesteps(self.num_inference_steps, device=device)
+
+            # pdb.set_trace()
 
             start_idx = chunk_i * self.chunk_latent_frames
             end_idx = chunk_i * self.chunk_latent_frames + self.chunk_latent_frames

@@ -16,6 +16,7 @@
 
 import einops
 import torch
+import os
 from typing import Optional
 from loguru import logger
 import numpy as np
@@ -209,13 +210,31 @@ def sequence_parallel_attention_vision(
     k,
     v,
     block_idx=None,
+    timestep=None,
     kv_cache=None,
     cache_vision=False,
 ):
     assert kv_cache is not None
+
+    t_value = timestep.flatten()[0].item() ## 1000, 937.5, 833.333, 625, 14
+    if t_value > 950:
+        timestep_id = 0
+    elif t_value > 900:
+        timestep_id = 1
+    elif t_value > 800:
+        timestep_id = 2
+    elif t_value > 600:
+        timestep_id = 3
+    else:
+        timestep_id = 4 # kv gen for next cycle
+    
+
     query, query_prope = q
     key, key_prope = k
     value, value_prope = v
+
+    if block_idx == 0 and timestep_id == 0:
+        print(f'key.shape: {key.shape}')
 
     query = torch.cat([query, query_prope], dim=0)
     key = torch.cat([key, key_prope], dim=0)
@@ -240,6 +259,7 @@ def sequence_parallel_attention_vision(
     cache_vision_key = kv_cache[block_idx]["k_vision"]  # previous key
     cache_vision_value = kv_cache[block_idx]["v_vision"]  # previous value
 
+    
     vision_kv = {}
     if cache_vision:
         vision_kv["k_vision"] = key
@@ -249,6 +269,13 @@ def sequence_parallel_attention_vision(
         key = torch.cat([cache_vision_key, key], dim=2)
         value = torch.cat([cache_vision_value, value], dim=2)
 
+    # if block_idx == 0 and timestep_id == 0:
+    #     print(f'key.shape after cat vision cache: {key.shape}')
+    #     print(f'query.shape after cat vision cache: {query.shape}')
+    
+    iteration_id = key.shape[2] // 6148
+
+
     encoder_key = kv_cache[block_idx]["k_txt"]
     encoder_value = kv_cache[block_idx]["v_txt"]
     encoder_key = repeat(encoder_key, "B H S D->(B R) H S D", R=2)
@@ -256,6 +283,10 @@ def sequence_parallel_attention_vision(
 
     key = torch.cat([encoder_key, key], dim=2)
     value = torch.cat([encoder_value, value], dim=2)
+
+    if block_idx == 0 and timestep_id == 0:
+        print(f'key.shape after cat text: {key.shape}')
+
 
     infer_state = get_infer_state()
     enable_sageattn = (
@@ -280,6 +311,34 @@ def sequence_parallel_attention_vision(
             hidden_states, sp_group, scatter_dim=1, gather_dim=2
         )
         hidden_states = hidden_states.to(query.dtype)
+
+    # # ===== 保存 Q / K 到本地（每张卡都保存）=====
+    # save_dir = "./debug_qk"
+    # os.makedirs(save_dir, exist_ok=True)
+
+    # if torch.distributed.is_initialized():
+    #     rank = torch.distributed.get_rank()
+    # else:
+    #     rank = 0
+
+    # save_path = os.path.join(
+    #     save_dir,
+    #     f"qk_rank{rank}_iter{iteration_id}_t{timestep_id}_block{block_idx}.pt"
+    # )
+    # if iteration_id % 4 == 0:  # 每隔4次迭代保存一次，避免过于频繁
+    #     torch.save(
+    #         {
+    #             "rank": rank,
+    #             "iteration_id": iteration_id,
+    #             "timestep_id": timestep_id,
+    #             "block_idx": block_idx,
+    #             "t_value": t_value,
+    #             "query": query.detach().cpu(),   # [B, H, S_q, D]
+    #             "key": key.detach().cpu(),       # [B, H, S_k, D]
+    #             "value": value.detach().cpu(),   # [B, H, S_k, D]
+    #         },
+    #         save_path,
+    #     )
 
     b, s, a, d = hidden_states.shape
     hidden_states = hidden_states.reshape(b, s, -1)
