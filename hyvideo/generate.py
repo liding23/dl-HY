@@ -297,6 +297,26 @@ def rank0_log(message, level):
         loguru.logger.log(level, message)
 
 
+def parse_layer_spec(spec: str):
+    spec = (spec or "all").strip().lower()
+    if spec == "all":
+        return None
+    layers = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            start, end = int(a), int(b)
+            if start > end:
+                start, end = end, start
+            layers.update(range(start, end + 1))
+        else:
+            layers.add(int(part))
+    return layers
+
+
 def str_to_bool(value):
     """Convert string to boolean, supporting true/false, 1/0, yes/no.
     If value is None (when flag is provided without value), returns True."""
@@ -1010,6 +1030,46 @@ def main():
         help="InfiniPot-V baseline parameter in [0,1]: TaR/VaN mixing weight.",
     )
     parser.add_argument(
+        "--kv_debug_log",
+        type=str_to_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Enable KV compression debug logging.",
+    )
+    parser.add_argument(
+        "--kv_debug_phase",
+        type=str,
+        default="both",
+        choices=["prefill", "decode", "both"],
+        help="KV debug log phase filter.",
+    )
+    parser.add_argument(
+        "--kv_debug_layers",
+        type=str,
+        default="all",
+        help="Layer filter for KV debug logs, e.g. all / 0-3,10,20.",
+    )
+    parser.add_argument(
+        "--kv_debug_interval",
+        type=int,
+        default=10,
+        help="Decode-step interval for KV debug logs.",
+    )
+    parser.add_argument(
+        "--kv_debug_level",
+        type=str,
+        default="summary",
+        choices=["summary", "detail"],
+        help="KV debug verbosity level.",
+    )
+    parser.add_argument(
+        "--kv_debug_file",
+        type=str,
+        default="",
+        help="Optional JSONL file to save KV debug entries.",
+    )
+    parser.add_argument(
         "--height",
         type=int,
         default=None,
@@ -1097,6 +1157,7 @@ def main():
         )
     if not (0.0 <= args.infinipot_alpha <= 1.0):
         raise ValueError("--infinipot_alpha must be in [0, 1].")
+    args.kv_debug_interval = max(1, int(args.kv_debug_interval))
 
     assert args.image_path is not None
 

@@ -108,6 +108,16 @@ def _compress_h2o(
     state["hh_score"] = hh_score
 
     if seq_len <= budget:
+        state["last_debug"] = {
+            "method": "h2o",
+            "phase": "decode",
+            "seq_in": int(seq_len),
+            "seq_out": int(seq_len),
+            "budget": int(budget),
+            "heavy_budget": int(max(budget - min(max(recent_window, 0), budget, seq_len), 0)),
+            "recent_budget": int(min(max(recent_window, 0), budget, seq_len)),
+            "hh_score_mean": float(hh_score.mean().item()) if hh_score.numel() > 0 else 0.0,
+        }
         return key, value, state
 
     recent = min(max(recent_window, 0), budget, seq_len)
@@ -133,6 +143,18 @@ def _compress_h2o(
     key = _gather_by_head(key, keep_idx)
     value = _gather_by_head(value, keep_idx)
     state["hh_score"] = torch.gather(hh_score, dim=1, index=keep_idx)
+    state["last_debug"] = {
+        "method": "h2o",
+        "phase": "decode",
+        "seq_in": int(seq_len),
+        "seq_out": int(key.shape[2]),
+        "budget": int(budget),
+        "heavy_budget": int(heavy_budget),
+        "recent_budget": int(recent),
+        "hh_score_mean": float(state["hh_score"].mean().item())
+        if state["hh_score"].numel() > 0
+        else 0.0,
+    }
     return key, value, state
 
 
@@ -161,6 +183,17 @@ def _rocket_stage1_prefill(
                 "decode_steps": 0,
             }
         )
+        state["last_debug"] = {
+            "method": "rocketkv",
+            "phase": "prefill",
+            "seq_in": int(seq_len),
+            "seq_out": int(seq_len),
+            "budget": int(budget),
+            "prompt_budget": int(seq_len),
+            "recent_budget": 0,
+            "page_size": int(max(1, page_size)),
+            "pages_selected": int(key_min.shape[1]),
+        }
         return key, value, state
 
     recent = min(max(recent_window, 0), budget, seq_len)
@@ -209,6 +242,17 @@ def _rocket_stage1_prefill(
             "decode_steps": 0,
         }
     )
+    state["last_debug"] = {
+        "method": "rocketkv",
+        "phase": "prefill",
+        "seq_in": int(seq_len),
+        "seq_out": int(key.shape[2]),
+        "budget": int(budget),
+        "prompt_budget": int(key.shape[2]),
+        "recent_budget": int(recent),
+        "page_size": int(max(1, page_size)),
+        "pages_selected": int(key_min.shape[1]),
+    }
     return key, value, state
 
 
@@ -292,6 +336,18 @@ def _rocket_stage2_decode(
     current_len = seq_len - history_len
 
     if history_len == 0:
+        state["last_debug"] = {
+            "method": "rocketkv",
+            "phase": "decode",
+            "seq_in": int(seq_len),
+            "seq_out": int(seq_len),
+            "budget": int(budget),
+            "history_len": int(history_len),
+            "history_budget": int(max(budget - (seq_len - history_len), 0)),
+            "select_budget": 0,
+            "recent_budget": 0,
+            "decode_step": int(state.get("decode_steps", 0)),
+        }
         return key, value, state
 
     history_budget = max(budget - current_len, 0)
@@ -303,10 +359,34 @@ def _rocket_stage2_decode(
         key = _gather_by_head(key, current_idx)
         value = _gather_by_head(value, current_idx)
         state["decode_steps"] = int(state.get("decode_steps", 0)) + 1
+        state["last_debug"] = {
+            "method": "rocketkv",
+            "phase": "decode",
+            "seq_in": int(seq_len),
+            "seq_out": int(key.shape[2]),
+            "budget": int(budget),
+            "history_len": int(history_len),
+            "history_budget": int(history_budget),
+            "select_budget": 0,
+            "recent_budget": 0,
+            "decode_step": int(state.get("decode_steps", 0)),
+        }
         return key, value, state
 
     if history_len <= history_budget:
         state["decode_steps"] = int(state.get("decode_steps", 0)) + 1
+        state["last_debug"] = {
+            "method": "rocketkv",
+            "phase": "decode",
+            "seq_in": int(seq_len),
+            "seq_out": int(seq_len),
+            "budget": int(budget),
+            "history_len": int(history_len),
+            "history_budget": int(history_budget),
+            "select_budget": 0,
+            "recent_budget": 0,
+            "decode_step": int(state.get("decode_steps", 0)),
+        }
         return key, value, state
 
     recent_hist = min(max(recent_window, 0), history_budget, history_len)
@@ -353,6 +433,21 @@ def _rocket_stage2_decode(
     key = _gather_by_head(key, keep_idx)
     value = _gather_by_head(value, keep_idx)
     state["decode_steps"] = int(state.get("decode_steps", 0)) + 1
+    state["last_debug"] = {
+        "method": "rocketkv",
+        "phase": "decode",
+        "seq_in": int(seq_len),
+        "seq_out": int(key.shape[2]),
+        "budget": int(budget),
+        "history_len": int(history_len),
+        "history_budget": int(history_budget),
+        "select_budget": int(select_budget),
+        "recent_budget": int(recent_hist),
+        "pages_selected": int(state.get("page_min").shape[1])
+        if state.get("page_min") is not None
+        else 0,
+        "decode_step": int(state.get("decode_steps", 0)),
+    }
     return key, value, state
 
 
@@ -477,6 +572,7 @@ def compress_vision_kv_cache(
         return key, value, state
 
     if method == "infinipot_v":
+        seq_in = int(seq_len)
         keep_idx = _infinipot_v_indices(
             key,
             value,
@@ -488,6 +584,16 @@ def compress_vision_kv_cache(
             keep_idx = torch.tensor([seq_len - 1], device=key.device, dtype=torch.long)
         key = key.index_select(dim=2, index=keep_idx)
         value = value.index_select(dim=2, index=keep_idx)
+        if state is not None:
+            state["last_debug"] = {
+                "method": "infinipot_v",
+                "phase": phase,
+                "seq_in": seq_in,
+                "seq_out": int(key.shape[2]),
+                "budget": int(budget),
+                "recent_budget": int(min(max(recent_window, 0), budget // 2, seq_in)),
+                "alpha": float(infinipot_alpha),
+            }
         return key, value, state
 
     raise ValueError(

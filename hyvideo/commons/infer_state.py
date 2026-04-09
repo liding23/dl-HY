@@ -41,6 +41,12 @@ class InferState:
     rocket_pool_kernel: int = 31
     rocket_page_size: int = 64
     infinipot_alpha: float = 0.6
+    kv_debug_log: bool = False
+    kv_debug_phase: str = "both"  # prefill/decode/both
+    kv_debug_layers: Optional[set] = None  # None means all
+    kv_debug_interval: int = 10
+    kv_debug_level: str = "summary"  # summary/detail
+    kv_debug_file: str = ""
 
 
 __infer_state = None
@@ -52,6 +58,27 @@ def parse_range(value):
         return list(range(start, end + 1))
     else:
         return [int(x) for x in value.split(",")]
+
+
+def parse_layer_set(value):
+    if value is None:
+        return None
+    value = value.strip().lower()
+    if value in ("", "all"):
+        return None
+    out = set()
+    for chunk in value.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "-" in chunk:
+            start, end = map(int, chunk.split("-", 1))
+            if end < start:
+                start, end = end, start
+            out.update(range(start, end + 1))
+        else:
+            out.add(int(chunk))
+    return out
 
 
 def initialize_infer_state(args):
@@ -83,6 +110,12 @@ def initialize_infer_state(args):
         rocket_pool_kernel=getattr(args, "rocket_pool_kernel", 31),
         rocket_page_size=getattr(args, "rocket_page_size", 64),
         infinipot_alpha=getattr(args, "infinipot_alpha", 0.6),
+        kv_debug_log=getattr(args, "kv_debug_log", False),
+        kv_debug_phase=getattr(args, "kv_debug_phase", "both"),
+        kv_debug_layers=parse_layer_set(getattr(args, "kv_debug_layers", "all")),
+        kv_debug_interval=max(1, int(getattr(args, "kv_debug_interval", 10))),
+        kv_debug_level=getattr(args, "kv_debug_level", "summary"),
+        kv_debug_file=getattr(args, "kv_debug_file", ""),
     )
     return __infer_state
 
