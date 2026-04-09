@@ -269,6 +269,9 @@ def sequence_parallel_attention_vision(
     if not cache_vision and cache_vision_key is not None:
         key = torch.cat([cache_vision_key, key], dim=2)
         value = torch.cat([cache_vision_value, value], dim=2)
+        history_len = cache_vision_key.shape[2]
+    else:
+        history_len = 0
 
     # if block_idx == 0 and timestep_id == 0:
     #     print(f'key.shape after cat vision cache: {key.shape}')
@@ -287,10 +290,13 @@ def sequence_parallel_attention_vision(
         infer_state is not None
         and getattr(infer_state, "kv_compression_method", "none") != "none"
         and getattr(infer_state, "kv_max_tokens", 0) > 0
-        and not cache_vision
-        and cache_vision_key is not None
     ):
-        key, value = compress_vision_kv_cache(
+        layer_state_key = "kv_compress_state"
+        if layer_state_key not in kv_cache[block_idx]:
+            kv_cache[block_idx][layer_state_key] = None
+
+        phase = "prefill" if cache_vision else "decode"
+        key, value, state = compress_vision_kv_cache(
             key=key,
             value=value,
             query=query,
@@ -300,7 +306,11 @@ def sequence_parallel_attention_vision(
             rocket_pool_kernel=infer_state.rocket_pool_kernel,
             rocket_page_size=infer_state.rocket_page_size,
             infinipot_alpha=infer_state.infinipot_alpha,
+            phase=phase,
+            state=kv_cache[block_idx][layer_state_key],
+            history_len=history_len,
         )
+        kv_cache[block_idx][layer_state_key] = state
 
     key = torch.cat([encoder_key, key], dim=2)
     value = torch.cat([encoder_value, value], dim=2)

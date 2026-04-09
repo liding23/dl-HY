@@ -994,10 +994,22 @@ class HunyuanVideo_1_5_Pipeline(DiffusionPipeline):
         transformer_num_layers = len(self.transformer.double_blocks)
         for i in range(transformer_num_layers):
             self._kv_cache.append(
-                {"k_vision": None, "v_vision": None, "k_txt": None, "v_txt": None}
+                {
+                    "k_vision": None,
+                    "v_vision": None,
+                    "k_txt": None,
+                    "v_txt": None,
+                    "kv_compress_state": None,
+                }
             )
             self._kv_cache_neg.append(
-                {"k_vision": None, "v_vision": None, "k_txt": None, "v_txt": None}
+                {
+                    "k_vision": None,
+                    "v_vision": None,
+                    "k_txt": None,
+                    "v_txt": None,
+                    "kv_compress_state": None,
+                }
             )
 
     def ar_rollout(
